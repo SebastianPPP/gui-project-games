@@ -1,7 +1,7 @@
 import pygame
 import sys
-import vc_snake 
-import dino_chrome as dino_game 
+import vc_snake_video 
+import dino_chrome_voice 
 
 WINDOW_WIDTH = 720
 WINDOW_HEIGHT = 480
@@ -50,15 +50,15 @@ def main_menu():
                 
                 if event.key == pygame.K_RETURN: 
                     if selected_game == 1:
-                        vc_snake.run_game()  # Automatyczne wykrywanie
+                        vc_snake_video.run_game()  # Automatyczne wykrywanie
                     elif selected_game == 2:
-                        dino_game.run_dino_game()  # Automatyczne wykrywanie
+                        dino_chrome_voice.run_dino_game()  # Automatyczne wykrywanie
                 
                 # Szybkie skróty klawiszowe
                 if event.key == pygame.K_1:
-                    vc_snake.run_game()
+                    vc_snake_video.run_game()
                 if event.key == pygame.K_2:
-                    dino_game.run_dino_game()
+                    dino_chrome_voice.run_dino_game()
 
 
         pygame.display.update()
