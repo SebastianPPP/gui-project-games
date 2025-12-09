@@ -6,6 +6,9 @@ import threading
 import cv2 
 import mediapipe as mp 
 
+camera_ready = False   # ← DODANE: Kamera gotowa dopiero po pierwszej klatce
+
+
 # game config
 SNAKE_SPEED = 5
 WINDOW_WIDTH = 720
@@ -56,49 +59,39 @@ def detect_gesture(hand_landmarks):
     
     tip_ids = [4, 8, 12, 16, 20] # Końcówki palców
     
-    # Wypisywanie statusu palców (1: wyprostowany, 0: zgięty)
     fingers = []
     
-    # 1. Kciuk (Sprawdzamy oś X dla kciuka)
+    # 1. Kciuk
     if hand_landmarks.landmark[tip_ids[0]].x < hand_landmarks.landmark[tip_ids[0]-1].x:
-        fingers.append(1) # Wyprostowany
+        fingers.append(1)
     else:
-        fingers.append(0) # Zgięty
+        fingers.append(0)
 
-    # 2. Pozostałe palce (Sprawdzamy oś Y: końcówka palca vs środek)
+    # 2. Pozostałe palce
     for id in range(1, 5):
         if hand_landmarks.landmark[tip_ids[id]].y < hand_landmarks.landmark[tip_ids[id]-2].y:
-            fingers.append(1) # Wyprostowany
+            fingers.append(1)
         else:
-            fingers.append(0) # Zgięty
+            fingers.append(0)
     
-    # 1. GÓRA: WSKAZUJĄCY (Tylko palec wskazujący wyprostowany)
     if fingers == [0, 1, 0, 0, 0]:
         return 'UP'
-
-    # 2. PRAWO: PIĘŚĆ (Wszystkie palce zgięte)
-    # Zmieniamy warunek dla pięści, gdyż MediaPipe może wykrywać zgięte palce jako (0,0,0,0,0)
     if fingers == [0, 0, 0, 0, 0]:
         return 'RIGHT'
-
-    # 3. LEWO: L (Kciuk + Wskazujący wyprostowane)
     if fingers == [1, 1, 0, 0, 0]:
         return 'LEFT'
-
-    # 4. DÓŁ: V (Wskazujący + Środkowy wyprostowane)
     if fingers == [0, 1, 1, 0, 0]:
         return 'DOWN'
         
     return None
 
 def gesture_control_snake(cam_index): 
-    global change_to, direction, camera_running
+    global change_to, direction, camera_running, camera_ready
     
     cap = cv2.VideoCapture(cam_index)
     
     if not cap.isOpened():
-        print("Nie można otworzyć kamery! Sprawdź, czy jest podłączona.")
-        global camera_running 
+        print("Nie można otworzyć kamery!")
         camera_running = False
         return
     
@@ -108,8 +101,12 @@ def gesture_control_snake(cam_index):
     while camera_running:
         success, image = cap.read()
         if not success:
-            if not camera_running: break # Jeśli flaga jest False, wyjdź natychmiast
+            if not camera_running:
+                break
             continue
+
+        # Kamera dopiero teraz jest gotowa!
+        camera_ready = True  # ← KLUCZOWE
 
         image = cv2.resize(image, (320, 240)) 
         image = cv2.flip(image, 1)
@@ -130,14 +127,15 @@ def gesture_control_snake(cam_index):
                         gesture == 'RIGHT' and direction != 'LEFT'):
                         
                         change_to = gesture
-                        cv2.putText(image, gesture, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+                        cv2.putText(image, gesture, (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
                 mp_drawing.draw_landmarks(
                     image,
                     hand_landmarks,
                     mp_hands.HAND_CONNECTIONS,
-                    mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2, circle_radius=2),
-                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2)
+                    mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2),
+                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2)
                 )
 
         cv2.imshow('Kamera', image)
@@ -161,7 +159,7 @@ def game_over():
     
     camera_running = False 
     
-    time.sleep(0.5) 
+    time.sleep(0.5)
     
     my_font = pygame.font.SysFont('times new roman', 90)
     game_over_surface = my_font.render('GAME OVER', True, RED)
@@ -173,18 +171,21 @@ def game_over():
     time.sleep(2)
     return True
 
+
 # main game loop
 def run_game(cam_index=None): 
-    global direction, change_to, score, food_spawn, snake_pos, snake_body, food_pos, camera_running
+    global direction, change_to, score, food_spawn, snake_pos, snake_body, food_pos, camera_running, camera_ready
+
+    camera_ready = False  # ← Reset flagi na starcie
 
     if cam_index is None:
         print("Szukanie kamery...")
         cam_index = get_default_camera()
         if cam_index is None:
-            print("Nie znaleziono kamery! Uruchamianie gry z brakiem sterowania gestami.")
+            print("Nie znaleziono kamery! Gra działa bez sterowania gestami.")
             pass
         else:
-            camera_running = True 
+            camera_running = True
     else:
         camera_running = True
         
@@ -199,20 +200,38 @@ def run_game(cam_index=None):
     
     thread = None
     if cam_index is not None:
-        thread = threading.Thread(target=gesture_control_snake, args=(cam_index,), name="GestureControl")
-        thread.daemon = True
+        thread = threading.Thread(target=gesture_control_snake, args=(cam_index,), daemon=True)
         thread.start()
-        print("GÓRA: Wskazujący palec. DÓŁ: V (Dwa palce). LEWO: L. PRAWO: Pięść.")
+        print("Gesty: Góra=Wskazujący, Dół=V, Lewo=L, Prawo=Pięść")
 
+    # ===========================================
+    # CZEKAJ NA KAMERĘ → Snake NIE RUSZA
+    # ===========================================
+    if cam_index is not None:
+        print("Czekam na kamerę...")
+        while not camera_ready:
+            game_window.fill(BLACK)
+            font = pygame.font.SysFont('times new roman', 40)
+            loading_text = font.render("Ładowanie kamery...", True, WHITE)
+            game_window.blit(loading_text, (WINDOW_WIDTH/2 - 160, WINDOW_HEIGHT/2 - 20))
+            pygame.display.update()
+            fps_controller.tick(10)
+        print("Kamera gotowa — start gry!")
+
+    # ===========================================
+    # GŁÓWNA PĘTLA GRY
+    # ===========================================
     while True:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                # Zakończenie wątku kamery
+
                 if thread is not None and thread.is_alive():
                     camera_running = False
-                    thread.join(timeout=1.0) # Czekamy na czyste zamknięcie wątku
+                    thread.join(timeout=1.0)
+
                 pygame.quit()
                 sys.exit()
+
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP and direction != 'DOWN':
                     change_to = 'UP'
@@ -223,7 +242,7 @@ def run_game(cam_index=None):
                 if event.key == pygame.K_RIGHT and direction != 'LEFT':
                     change_to = 'RIGHT'
         
-        # zabronione cofania się
+        # Zabronione cofanie się
         if change_to == 'UP' and direction != 'DOWN':
             direction = 'UP'
         if change_to == 'DOWN' and direction != 'UP':
@@ -233,6 +252,7 @@ def run_game(cam_index=None):
         if change_to == 'RIGHT' and direction != 'LEFT':
             direction = 'RIGHT'
         
+        # RUCH WĘŻA
         if direction == 'UP':
             snake_pos[1] -= 10
         if direction == 'DOWN':
@@ -242,42 +262,42 @@ def run_game(cam_index=None):
         if direction == 'RIGHT':
             snake_pos[0] += 10
 
-        # mechanizm wzrostu węża
         snake_body.insert(0, list(snake_pos))
-        if snake_pos[0] == food_pos[0] and snake_pos[1] == food_pos[1]:
+        if snake_pos == food_pos:
             score += 10
             food_spawn = False
         else:
             snake_body.pop()
             
         if not food_spawn:
-            food_pos = [random.randrange(1, (WINDOW_WIDTH//10)) * 10,
-                        random.randrange(1, (WINDOW_HEIGHT//10)) * 10]
+            food_pos = [
+                random.randrange(1, WINDOW_WIDTH//10) * 10,
+                random.randrange(1, WINDOW_HEIGHT//10) * 10
+            ]
         food_spawn = True
 
-        # rysowanie wszystkiego na ekranie
         game_window.fill(BLACK)
         for pos in snake_body:
             pygame.draw.rect(game_window, GREEN, pygame.Rect(pos[0], pos[1], 10, 10))
         
         pygame.draw.rect(game_window, WHITE, pygame.Rect(food_pos[0], food_pos[1], 10, 10))
 
-        # warunki zakończenia gry
-        collision_self = any(snake_pos[0] == block[0] and snake_pos[1] == block[1] for block in snake_body[1:])
+        # Kolizje
+        collision_self = any(snake_pos == block for block in snake_body[1:])
         
         if (snake_pos[0] < 0 or snake_pos[0] > WINDOW_WIDTH-10 or 
             snake_pos[1] < 0 or snake_pos[1] > WINDOW_HEIGHT-10 or 
             collision_self):
             
-            if game_over(): 
+            if game_over():
                 if thread is not None and thread.is_alive():
                     thread.join(timeout=1.0)
                 return
 
-        # odświeżenie ekranu gry i wyniku
         show_score(1, WHITE, 'times new roman', 20)
         pygame.display.update()
         fps_controller.tick(SNAKE_SPEED)
+
 
 if __name__ == '__main__':
     run_game()

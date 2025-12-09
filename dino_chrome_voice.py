@@ -67,6 +67,7 @@ def voice_control_dino(mic_index):
                          rate=RATE,
                          input=True,
                          frames_per_buffer=CHUNK_SIZE,
+                        
                          input_device_index=mic_index)
         
         print(f"Monitorowanie głośności")
