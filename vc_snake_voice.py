@@ -56,7 +56,7 @@ def vad_listener():
                      channels=1,
                      rate=RATE,
                      input=True,
-                     input_device_index=2,
+                     input_device_index=None,
                      frames_per_buffer=CHUNK)
 
     # Kalibracja szumu
@@ -67,7 +67,7 @@ def vad_listener():
         time.sleep(0.05)
 
     noise_level = np.mean(noise)
-    THRESHOLD = noise_level * 30.0
+    THRESHOLD = noise_level * 15.0
 
     HOLD_TIME = 0.8
     POST_BUFFER = 0.3
@@ -113,12 +113,11 @@ def speech_recognition_worker():
     while running:
         raw_audio = audio_queue.get()
         audio_data = sr.AudioData(raw_audio, 16000, 2)
-
+        command_recognized = False
         try:
             text = recognizer.recognize_google(audio_data).lower()
             print(">> Google rozpoznał:", text)
 
-            command_recognized = False
 
             if "move up" in text:
                 change_to = "UP"
@@ -183,9 +182,24 @@ def game_over():
 #                      MAIN GAME LOOP
 # ============================================================
 def run_game():
-    global direction, change_to, score, food_spawn, food_pos, snake_pos, snake_body, running
+    global direction, change_to, score, food_spawn, food_pos, snake_pos, snake_body, paused
 
-    running = True  # restart flagi po powrocie z menu
+    # --- RESET STANU GRY (NIE DOTYKAMY AUDIO!) ---
+    paused = False
+
+    snake_pos = [100, 50]
+    snake_body = [[100, 50], [90, 50], [80, 50]]
+
+    food_pos = [random.randrange(1, (WINDOW_WIDTH // 10)) * 10,
+                random.randrange(1, (WINDOW_HEIGHT // 10)) * 10]
+    food_spawn = True
+
+    direction = 'RIGHT'
+    change_to = direction
+    score = 0
+    # --- KONIEC RESETU ---
+
+    running=True
 
     vad_thread = threading.Thread(target=vad_listener, daemon=True)
     sr_thread = threading.Thread(target=speech_recognition_worker, daemon=True)

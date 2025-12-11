@@ -3,6 +3,7 @@ import sys
 import vc_snake_video
 import vc_snake_voice     # ← DODANE
 import dino_chrome_voice
+import dino_chrome_video
 
 WINDOW_WIDTH = 720
 WINDOW_HEIGHT = 480
@@ -25,7 +26,8 @@ def main_menu():
     options = [
         "1. Snake (wideo)",
         "2. Snake (głosowy)",
-        "3. Dino (głosowy)",
+        "3. Dino (wideo)",
+        "4. Dino (głosowy)",
         "ESC - Wyjście"
     ]
     
@@ -45,9 +47,9 @@ def main_menu():
 
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_DOWN:
-                    selected_game = (selected_game % 3) + 1
+                    selected_game = (selected_game % 4) + 1
                 if event.key == pygame.K_UP:
-                    selected_game = (selected_game - 2) % 3 + 1
+                    selected_game = (selected_game - 2) % 4 + 1
 
                 if event.key == pygame.K_ESCAPE:
                     pygame.quit()
@@ -59,14 +61,18 @@ def main_menu():
                     elif selected_game == 2:
                         vc_snake_voice.run_game()     # ← NOWE!
                     elif selected_game == 3:
+                        dino_chrome_video.run_dino_camera_game()
+                    elif selected_game == 4:
                         dino_chrome_voice.run_dino_game()
 
                 # Szybkie skróty
                 if event.key == pygame.K_1:
                     vc_snake_video.run_game()
                 if event.key == pygame.K_2:
-                    vc_snake_voice.run_snake_voice()         # ← NOWE!
+                    vc_snake_voice.run_game()         # ← NOWE!
                 if event.key == pygame.K_3:
+                    dino_chrome_video.run_dino_camera_game()
+                if event.key == pygame.K_4:
                     dino_chrome_voice.run_dino_game()
 
         pygame.display.update()
