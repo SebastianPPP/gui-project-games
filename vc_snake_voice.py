@@ -1,292 +1,303 @@
 import pygame
 import time
 import random
-import speech_recognition as sr
 import threading
 import pyaudio
 import numpy as np
-import queue
+import csv
+import speech_recognition as sr
+from ctypes import *
 
-# Sterowanie wątkami
-running = True      # zatrzymuje VAD i SR po wyjściu z gry
-audio_queue = queue.Queue()
-paused = False
+try:
+    ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+    def py_error_handler(filename, line, function, err, fmt): pass
+    c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+    asound = cdll.LoadLibrary('libasound.so')
+    asound.snd_lib_error_set_handler(c_error_handler)
+except: pass
 
-# game config
-SNAKE_SPEED = 5
-WINDOW_WIDTH = 720
-WINDOW_HEIGHT = 480
+WINDOW_WIDTH = 850
+WINDOW_HEIGHT = 600
+SCORE_FILE = "scoreboard.csv"
 
-# Kolory
-BLACK = pygame.Color(0, 0, 0)
-WHITE = pygame.Color(255, 255, 255)
-RED = pygame.Color(255, 0, 0)
-GREEN = pygame.Color(0, 255, 0)
+BLACK = (15, 15, 25)
+WHITE = (255, 255, 255)
+GREEN = (50, 255, 50)
+NEON_BLUE = (50, 150, 255)
+NEON_YELLOW = (255, 255, 50)
+GRAY = (100, 100, 100)
+RED = (255, 50, 50)
 
-# Initialize Pygame
-pygame.init()
-pygame.display.set_caption('Voice Controlled Snake')
-game_window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+CHUNK_SIZE = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RECORD_SECONDS = 1.5 
 
-fps_controller = pygame.time.Clock()
-
-# game variables
-snake_pos = [100, 50]
-snake_body = [[100, 50], [90, 50], [80, 50]]
-food_pos = [random.randrange(1, (WINDOW_WIDTH//10)) * 10,
-            random.randrange(1, (WINDOW_HEIGHT//10)) * 10]
-food_spawn = True
-
+# Globalne
+running = True
+current_player_name = "Gracz"
 direction = 'RIGHT'
 change_to = direction
-score = 0
+snake_paused_for_voice = False  # Flaga pauzy
 
+def open_audio_stream(p, dev_index, input=True):
+    rates_to_try = [44100, 48000, 16000] if input else [44100]
+    if dev_index is not None:
+        try: dev_index = int(dev_index)
+        except: dev_index = None
 
-# ============================================================
-#                   VAD LISTENER
-# ============================================================
-def vad_listener():
-    global paused, running
-
-    pa = pyaudio.PyAudio()
-    RATE = 16000
-    CHUNK = 1024
-
-    stream = pa.open(format=pyaudio.paInt16,
-                     channels=1,
-                     rate=RATE,
-                     input=True,
-                     input_device_index=None,
-                     frames_per_buffer=CHUNK)
-
-    # Kalibracja szumu
-    noise = []
-    for _ in range(20):
-        data = np.frombuffer(stream.read(CHUNK, exception_on_overflow=False), dtype=np.int16)
-        noise.append(np.abs(data).mean())
-        time.sleep(0.05)
-
-    noise_level = np.mean(noise)
-    THRESHOLD = noise_level * 15.0
-
-    HOLD_TIME = 0.8
-    POST_BUFFER = 0.3
-
-    recording = False
-    buffer_frames = []
-    last_voice_time = 0
-
-    while running:
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        frame = np.frombuffer(data, dtype=np.int16)
-        volume = np.abs(frame).mean()
-        now = time.time()
-
-        if volume > THRESHOLD:
-            if not recording:
-                paused = True
-                recording = True
-
-            last_voice_time = now
-            buffer_frames.append(data)
-            continue
-
-        if recording and (now - last_voice_time > HOLD_TIME):
-            extra_chunks = int((POST_BUFFER * RATE) / CHUNK)
-            for _ in range(extra_chunks):
-                buffer_frames.append(stream.read(CHUNK, exception_on_overflow=False))
-
-            audio_queue.put(b"".join(buffer_frames))
-
-            recording = False
-            buffer_frames = []
-
-
-# ============================================================
-#               SPEECH RECOGNITION WORKER
-# ============================================================
-def speech_recognition_worker():
-    global change_to, paused, running
-
-    recognizer = sr.Recognizer()
-
-    while running:
-        raw_audio = audio_queue.get()
-        audio_data = sr.AudioData(raw_audio, 16000, 2)
-        command_recognized = False
+    for r in rates_to_try:
         try:
-            text = recognizer.recognize_google(audio_data).lower()
-            print(">> Google rozpoznał:", text)
+            stream = p.open(format=FORMAT, channels=CHANNELS, rate=r, 
+                            input=input, output=not input,
+                            input_device_index=dev_index if input else None, 
+                            frames_per_buffer=CHUNK_SIZE)
+            return stream, r
+        except Exception: continue
+    return None, 44100
 
+def save_score_to_csv(score):
+    try:
+        with open(SCORE_FILE, mode='a', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerow(["snake_voice", current_player_name, score])
+    except: pass
 
-            if "move up" in text:
-                change_to = "UP"
-                command_recognized = True
+def recognize_speech(audio_bytes, rate):
+    r = sr.Recognizer()
+    try:
+        audio_data = sr.AudioData(audio_bytes, rate, 2) # 2 = sample_width (16-bit)
+        
+        # Rozpoznawanie (Język POLSKI)
+        text = r.recognize_google(audio_data, language="pl-PL").lower()
+        print(f"Google usłyszał: '{text}'")
+        return text
+    except sr.UnknownValueError:
+        print("Google: Nie zrozumiano")
+    except sr.RequestError:
+        print("Google: Błąd połączenia")
+    except Exception as e:
+        print(f"Błąd rozpoznawania: {e}")
+    return None
 
-            elif "move down" in text:
-                change_to = "DOWN"
-                command_recognized = True
+def game_audio_thread(p, mic_id, rate):
+    global running, change_to, snake_paused_for_voice
+    
+    stream, valid_rate = open_audio_stream(p, mic_id, input=True)
+    if not stream:
+        print("Błąd mikrofonu w grze")
+        return
 
-            elif "move left" in text:
-                change_to = "LEFT"
-                command_recognized = True
+    noise_level = 500
+    temp = []
+    print("Kalibracja szumu...")
+    for _ in range(20):
+        try:
+            d = np.frombuffer(stream.read(CHUNK_SIZE, exception_on_overflow=False), dtype=np.int16)
+            temp.append(np.abs(d).mean())
+        except: pass
+    if temp: noise_level = max(np.mean(temp) * 2.5, 600)
+    print(f"Próg szumu: {noise_level:.0f}")
 
-            elif "move right" in text:
-                change_to = "RIGHT"
-                command_recognized = True
+    while running:
+        if snake_paused_for_voice:
+            frames = []
+            try: stream.read(stream.get_read_available(), exception_on_overflow=False)
+            except: pass
+            
+            for _ in range(0, int(valid_rate / CHUNK_SIZE * RECORD_SECONDS)):
+                try:
+                    data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                    frames.append(data)
+                except: pass
+            
+            full_audio = b''.join(frames)
+            
+            text = recognize_speech(full_audio, valid_rate)
+            
+            if text:
+                if "gór" in text or "gura" in text: change_to = 'UP'
+                elif "dół" in text or "doł" in text: change_to = 'DOWN'
+                elif "lew" in text: change_to = 'LEFT'
+                elif "praw" in text: change_to = 'RIGHT'
+            
+            snake_paused_for_voice = False
+            
+        else:
+            try:
+                data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                vol = np.abs(np.frombuffer(data, dtype=np.int16)).mean()
+                
+                if vol > noise_level:
+                    print(f"Wykryto głos ({vol:.0f}) -> PAUZA i SŁUCHANIE")
+                    snake_paused_for_voice = True
+            except: pass
 
-            elif "game resume" in text:
-                command_recognized = True
+    stream.close()
 
-            else:
-                print(">> Nieznana komenda.")
+def show_config_screen(screen):
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont('arial', 24)
+    player_name = "Gracz"
+    
+    p = pyaudio.PyAudio()
+    mics = []
+    try:
+        for i in range(p.get_device_count()):
+            try:
+                info = p.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    mics.append(f"{i}: {info['name'][:25]}")
+            except: pass
+    except: pass
+    if not mics: mics = ["Brak mikrofonu"]
+    sel_idx = 0
+    
+    def get_mic_id():
+        try: return int(mics[sel_idx].split(':')[0])
+        except: return None
 
-        except Exception:
-            print(">> Błąd rozpoznawania.")
+    stream, rate = open_audio_stream(p, get_mic_id())
 
-        if command_recognized:
-            paused = False
-            print(">> Gra wznowiona.")
+    while True:
+        screen.fill(BLACK)
+        pygame.draw.rect(screen, (30,30,40), (50,50,750,500), border_radius=10)
+        pygame.draw.rect(screen, NEON_BLUE, (50,50,750,500), 2, border_radius=10)
+        
+        screen.blit(font.render("KONFIGURACJA GŁOSU", True, WHITE), (320, 70))
+        screen.blit(font.render(f"1. Gracz: {player_name}", True, WHITE), (100, 130))
+        screen.blit(font.render(f"2. Mikrofon: < {mics[sel_idx]} >", True, GREEN), (100, 180))
+        
+        bar_w = 0
+        if stream and stream.is_active():
+            try:
+                data = np.frombuffer(stream.read(CHUNK_SIZE, exception_on_overflow=False), dtype=np.int16)
+                vol = np.abs(data).mean()
+                bar_w = min(200, int(vol / 10))
+            except: pass
+        
+        pygame.draw.rect(screen, GRAY, (300, 220, 200, 20))
+        pygame.draw.rect(screen, GREEN, (300, 220, bar_w, 20))
+        screen.blit(font.render("Test Mikrofonu", True, GRAY), (300, 250))
 
-        audio_queue.task_done()
+        pygame.draw.rect(screen, NEON_BLUE, (250, 450, 350, 60), border_radius=5)
+        st = font.render("GRAJ (ENTER)", True, WHITE)
+        screen.blit(st, (425 - st.get_width()//2, 480 - st.get_height()//2))
 
+        pygame.display.flip()
 
-# ============================================================
-#                      GUI + LOGIKA
-# ============================================================
-def show_score(choice, color, font, size):
-    score_font = pygame.font.SysFont(font, size)
-    score_surface = score_font.render('Score : ' + str(score), True, color)
-    score_rect = score_surface.get_rect()
-    game_window.blit(score_surface, score_rect)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                if stream: stream.close(); p.terminate()
+                return None, None, None
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if stream: stream.close(); p.terminate()
+                    return None, None, None
+                if event.key == pygame.K_BACKSPACE: player_name = player_name[:-1]
+                elif len(player_name) < 12 and event.unicode.isalnum(): player_name += event.unicode
+                
+                if event.key in [pygame.K_RIGHT, pygame.K_LEFT]:
+                    if stream: stream.close()
+                    if event.key == pygame.K_RIGHT: sel_idx = (sel_idx + 1) % len(mics)
+                    else: sel_idx = (sel_idx - 1) % len(mics)
+                    stream, rate = open_audio_stream(p, get_mic_id())
 
+                if event.key == pygame.K_RETURN:
+                    if stream: stream.close()
+                    p.terminate()
+                    return player_name, get_mic_id(), rate
+        clock.tick(30)
 
-def game_over():
-    global paused
-
-    paused = False
-
-    my_font = pygame.font.SysFont('times new roman', 90)
-    game_over_surface = my_font.render('GAME OVER', True, RED)
-    game_over_rect = game_over_surface.get_rect()
-    game_over_rect.midtop = (WINDOW_WIDTH/2, WINDOW_HEIGHT/4)
-    game_window.blit(game_over_surface, game_over_rect)
-    show_score(0, BLACK, 'times new roman', 20)
-    pygame.display.flip()
-    time.sleep(2)
-
-    return True   # ← KLUCZOWE
-
-
-# ============================================================
-#                      MAIN GAME LOOP
-# ============================================================
 def run_game():
-    global direction, change_to, score, food_spawn, food_pos, snake_pos, snake_body, paused
-
-    # --- RESET STANU GRY (NIE DOTYKAMY AUDIO!) ---
-    paused = False
+    global direction, change_to, score, food_spawn, snake_pos, snake_body, food_pos, running, current_player_name, snake_paused_for_voice
+    
+    pygame.init()
+    win = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    
+    res = show_config_screen(win)
+    if not res: return
+    current_player_name, mic_id, best_rate = res
 
     snake_pos = [100, 50]
     snake_body = [[100, 50], [90, 50], [80, 50]]
-
-    food_pos = [random.randrange(1, (WINDOW_WIDTH // 10)) * 10,
-                random.randrange(1, (WINDOW_HEIGHT // 10)) * 10]
-    food_spawn = True
-
+    food_pos = [200, 200]
     direction = 'RIGHT'
     change_to = direction
     score = 0
-    # --- KONIEC RESETU ---
+    running = True
+    snake_paused_for_voice = False
 
-    running=True
-
-    vad_thread = threading.Thread(target=vad_listener, daemon=True)
-    sr_thread = threading.Thread(target=speech_recognition_worker, daemon=True)
-    vad_thread.start()
-    sr_thread.start()
-
-    while True:
-        # Obsługa eventów
+    p_game = pyaudio.PyAudio()
+    t = threading.Thread(target=game_audio_thread, args=(p_game, mic_id, best_rate), daemon=True)
+    t.start()
+    
+    clk = pygame.time.Clock()
+    font_instr = pygame.font.SysFont('arial', 20)
+    font_status = pygame.font.SysFont('arial', 40, bold=True)
+    
+    while running:
         for event in pygame.event.get():
+            if event.type == pygame.QUIT: running = False
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_UP:
-                    change_to = 'UP'
-                elif event.key == pygame.K_DOWN:
-                    change_to = 'DOWN'
-                elif event.key == pygame.K_LEFT:
-                    change_to = 'LEFT'
-                elif event.key == pygame.K_RIGHT:
-                    change_to = 'RIGHT'
+                if event.key == pygame.K_ESCAPE: running = False
+                if event.key == pygame.K_UP: change_to = 'UP'
+                if event.key == pygame.K_DOWN: change_to = 'DOWN'
+                if event.key == pygame.K_LEFT: change_to = 'LEFT'
+                if event.key == pygame.K_RIGHT: change_to = 'RIGHT'
 
-            if event.type == pygame.QUIT:
+        if not snake_paused_for_voice:
+            if change_to == 'UP' and direction != 'DOWN': direction = 'UP'
+            if change_to == 'DOWN' and direction != 'UP': direction = 'DOWN'
+            if change_to == 'LEFT' and direction != 'RIGHT': direction = 'LEFT'
+            if change_to == 'RIGHT' and direction != 'LEFT': direction = 'RIGHT'
+
+            if direction == 'UP': snake_pos[1] -= 10
+            elif direction == 'DOWN': snake_pos[1] += 10
+            elif direction == 'LEFT': snake_pos[0] -= 10
+            elif direction == 'RIGHT': snake_pos[0] += 10
+
+            snake_body.insert(0, list(snake_pos))
+            if snake_pos == food_pos:
+                score += 10
+                food_pos = [random.randrange(1, WINDOW_WIDTH//10)*10, random.randrange(1, WINDOW_HEIGHT//10)*10]
+            else: snake_body.pop()
+
+            if (snake_pos[0] < 0 or snake_pos[0] > WINDOW_WIDTH or snake_pos[1] < 0 or snake_pos[1] > WINDOW_HEIGHT or any(snake_pos == b for b in snake_body[1:])):
+                save_score_to_csv(score)
                 running = False
-                return  # ← WRACA DO MENU
+                win.fill(BLACK)
+                go = pygame.font.SysFont('arial', 50).render("GAME OVER", True, RED)
+                win.blit(go, (WINDOW_WIDTH//2-100, WINDOW_HEIGHT//2))
+                pygame.display.flip()
+                time.sleep(2)
 
-        # Blokowanie przeciwstawnych kierunków
-        if change_to == 'UP' and direction != 'DOWN':
-            direction = 'UP'
-        elif change_to == 'DOWN' and direction != 'UP':
-            direction = 'DOWN'
-        elif change_to == 'LEFT' and direction != 'RIGHT':
-            direction = 'LEFT'
-        elif change_to == 'RIGHT' and direction != 'LEFT':
-            direction = 'RIGHT'
-
-        # Pauza (mówisz → pauza)
-        if paused:
-            show_score(1, WHITE, 'times new roman', 20)
-            pygame.display.update()
-            fps_controller.tick(SNAKE_SPEED)
-            continue
-
-        # -------------------
-        # RUCH WĘŻA
-        # -------------------
-        if direction == 'UP': snake_pos[1] -= 10
-        elif direction == 'DOWN': snake_pos[1] += 10
-        elif direction == 'LEFT': snake_pos[0] -= 10
-        elif direction == 'RIGHT': snake_pos[0] += 10
-
-        snake_body.insert(0, list(snake_pos))
-        if snake_pos == food_pos:
-            score += 10
-            food_spawn = False
+        win.fill(BLACK)
+        
+        if snake_paused_for_voice:
+            ov = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT))
+            ov.set_alpha(150)
+            ov.fill((0,0,50))
+            win.blit(ov, (0,0))
+            
+            st_txt = font_status.render("SŁUCHAM...", True, NEON_YELLOW)
+            win.blit(st_txt, (WINDOW_WIDTH//2 - st_txt.get_width()//2, WINDOW_HEIGHT//2))
+            
+            hint = font_instr.render("(Powiedz: góra, dół, lewo, prawo)", True, WHITE)
+            win.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT//2 + 50))
         else:
-            snake_body.pop()
+            msg = font_instr.render("Krzyknij, aby wydać komendę!", True, GRAY)
+            win.blit(msg, (10, WINDOW_HEIGHT - 30))
+        
+        for pos in snake_body: pygame.draw.rect(win, GREEN, pygame.Rect(pos[0], pos[1], 10, 10))
+        pygame.draw.rect(win, WHITE, pygame.Rect(food_pos[0], food_pos[1], 10, 10))
+        
+        sc_txt = font_instr.render(f"Wynik: {score}", True, WHITE)
+        win.blit(sc_txt, (10, 10))
 
-        if not food_spawn:
-            food_pos = [random.randrange(1, WINDOW_WIDTH//10) * 10,
-                        random.randrange(1, WINDOW_HEIGHT//10) * 10]
-        food_spawn = True
-
-        # -------------------
-        # RYSOWANIE
-        # -------------------
-        game_window.fill(BLACK)
-        for pos in snake_body:
-            pygame.draw.rect(game_window, GREEN, pygame.Rect(pos[0], pos[1], 10, 10))
-
-        pygame.draw.rect(game_window, WHITE, pygame.Rect(food_pos[0], food_pos[1], 10, 10))
-
-        # -------------------
-        # KOLIZJE
-        # -------------------
-        if snake_pos[0] < 0 or snake_pos[0] > WINDOW_WIDTH-10:
-            if game_over(): return
-
-        if snake_pos[1] < 0 or snake_pos[1] > WINDOW_HEIGHT-10:
-            if game_over(): return
-
-        for block in snake_body[1:]:
-            if snake_pos == block:
-                if game_over(): return
-
-        # Aktualizacja ekranu
-        show_score(1, WHITE, 'times new roman', 20)
         pygame.display.update()
-        fps_controller.tick(SNAKE_SPEED)
-
+        clk.tick(10)
+    
+    p_game.terminate()
 
 if __name__ == '__main__':
     run_game()

@@ -1,0 +1,4 @@
+__pycache__
+.vscode
+scoreboard.csv
+test_microphone.py
